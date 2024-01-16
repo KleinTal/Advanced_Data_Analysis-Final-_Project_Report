@@ -1,0 +1,625 @@
+---
+title: "Project "
+author: "Team 14"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+# Team 14 project:
+
+### (Ido Villa, Tal Klein, Ariel Siman Tov)
+
+```{r load-packages, message = FALSE}
+library(knitr)
+library(tidyverse)
+library(broom)
+library(htmltools)
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(tidymodels)
+library(tinytex)
+library(latexpdf)
+library(Boruta)
+library(caret)
+library(gridExtra)
+library(randomForest)
+library(pROC)
+library(ggplot2)
+```
+
+```{r setup, include = FALSE}
+opts_chunk$set(echo=FALSE) # hide source code in the document
+```
+
+
+### Data
+
+```{r}
+# Read the CSV file
+
+data <- read.csv('data.csv')
+
+# Convert categorical variables to binary indicators
+
+new_data <- data %>%
+  mutate(ind.debateclub = if_else(ind.debateclub=="True", 1, 0),
+         ind.programming_exp = if_else(ind.programming_exp=="True", 1, 0),
+         ind.international_exp = if_else(ind.international_exp=="True", 1, 0),
+         ind.entrepeneur_exp = if_else(ind.entrepeneur_exp=="True", 1, 0),
+         ind.exact_study = if_else(ind.exact_study=="True", 1, 0),
+         decision = if_else(decision=="True", 1, 0),
+         ind.degree = case_when(
+           ind.degree == "bachelor" ~ 1,
+           ind.degree == "master" ~ 2,
+           ind.degree == "phd" ~ 3,
+           TRUE ~ 0  # Handle other cases if needed
+         )
+  )
+
+```
+
+
+### train and test
+
+```{r}
+# Set the seed for reproducibility
+
+set.seed(1116)
+
+# Split the data into training and testing sets
+
+new_data$decision <- as.factor(new_data$decision)
+office_split <- initial_split(new_data, prop = 0.75)
+train <- training(office_split)
+train <- train[, -which(names(train) == "Id")]
+test <- testing(office_split)
+test <- test[, -which(names(test) == "Id")]
+```
+
+
+
+## Step 1 :
+
+
+### logistic regression model
+
+```{r}
+# Create a recipe for the logistic regression model
+
+model_recipe <- recipe(decision ~ ., data = train)
+```
+
+
+```{r}
+# Create a logistic regression model using the glm engine
+
+model <- logistic_reg() %>% 
+  set_engine("glm")
+
+# Create a workflow for the model
+
+model_workflow <- workflow() %>% 
+  add_model(model) %>% 
+  add_recipe(model_recipe)
+```
+
+```{r}
+# Fit the model using the training data
+
+fit_model <- model_workflow %>% 
+  fit(data = train)
+```
+
+```{r}
+# Generate predicted probabilities for the test data
+
+pred_model_prob <- predict(fit_model,test,type="prob")%>%
+  bind_cols(test)
+
+```
+
+```{r}
+# Perform evaluation of model predictions
+
+evauate_met <- pred_model_prob %>%
+  mutate(decision = if_else(decision == 1, "pass", "not pass"),
+  spam_pred = if_else(.pred_1> 0.5 , "labelled pass", "labelled not pass")) %>%
+  count(spam_pred, decision) %>%
+  pivot_wider(names_from = decision, values_from = n) %>%
+  kable(col.names = c("", "not pass", "pass"))
+evauate_met
+```
+
+```{r}
+# Perform evaluation metrics
+
+evaluate_met <- pred_model_prob %>%
+  mutate(decision = if_else(decision == 1, "pass", "not pass"),
+  spam_pred = if_else(.pred_1 > 0.5, "labelled pass", "labelled not pass")) %>%
+  count(spam_pred, decision) %>%
+  pivot_wider(names_from = decision, values_from = n) %>%
+  as.data.frame()
+
+
+# Extract TP, FP, FN, TN
+TP <- evaluate_met[evaluate_met$spam_pred == "labelled pass", "pass"]
+FP <- evaluate_met[evaluate_met$spam_pred == "labelled pass", "not pass"]
+FN <- evaluate_met[evaluate_met$spam_pred == "labelled not pass", "pass"]
+TN <- evaluate_met[evaluate_met$spam_pred == "labelled not pass", "not pass"]
+
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Calculate recall
+recall <- TP / (TP + FN)
+
+# Calculate F1 score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Calculate accuracy
+accuracy <- (TP + TN) / (TP + FP + TN + FN)
+
+# Print the results
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("Accuracy:", accuracy, "\n")
+
+```
+
+
+
+### random forest model
+
+```{r}
+
+# Random Forest model
+rf_model <- randomForest(decision ~ ., data = train, ntree = 100)
+
+# Preprocess the test data based on the model recipe
+preprocessed_test <- prep(model_recipe) %>% bake(new_data = test)
+
+# Make predictions on the preprocessed test data
+rf_predictions <- predict(rf_model, newdata = test)
+
+# Calculate confusion matrix
+confusion <- table(preprocessed_test$decision, rf_predictions)
+
+# Calculate metrics
+TP <- confusion[2, 2]
+FN <- confusion[2, 1]
+FP <- confusion[1, 2]
+
+# Calculate recall (RECOLL)
+recall <- TP / (TP + FN)
+
+# Calculate F1 score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Calculate precision
+precision <- TP / (TP + FP)
+
+# Print precision
+print(paste("Precision:", precision))
+
+# Print the accuracy, recall, and F1 score
+rf_accuracy <- sum(rf_predictions == preprocessed_test$decision) / length(rf_predictions)
+print(paste("Random Forest Accuracy:", rf_accuracy))
+print(paste("Recall:", recall))
+print(paste("F1 Score:", f1_score))
+```
+
+
+
+### Plot ROC curves
+
+```{r}
+# Generate predictions and compute ROC curves
+predictions_RF <- predict(rf_model, newdata = test, type = "prob")[, 2]
+roc_obj_RF <- roc(test$decision, predictions_RF)
+roc_obj_logistic <- roc(pred_model_prob$decision, pred_model_prob$.pred_1)
+
+# Create a data frame with ROC curve data
+roc_data <- rbind(
+  data.frame(Model = "Random Forest",
+             FPR = 1 - roc_obj_RF$specificities,
+             TPR = roc_obj_RF$sensitivities),
+  data.frame(Model = "Logistic Regression",
+             FPR = 1 - roc_obj_logistic$specificities,
+             TPR = roc_obj_logistic$sensitivities)
+)
+
+# Plot ROC curves
+ggplot(roc_data, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  labs(x = "1-specificities", y = "sensitivities", title = "ROC Curve Comparison") +
+  scale_color_manual(values = c("blue", "red")) +
+  theme_minimal()
+```
+
+### roc_auc
+
+```{r}
+auc(roc_obj_RF)
+```
+
+```{r}
+auc(roc_obj_logistic)
+```
+
+
+
+## choosing Random forest base on the results
+
+
+
+### cross-validation on Random forest model
+
+```{r}
+# Select features and target variables
+features <- new_data[, -which(names(new_data) %in% c("ID", "decision"))]
+target <- new_data$decision
+
+# Set the seed for reproducibility
+set.seed(2023) 
+
+# Create folds for cross-validation
+folds <- createFolds(target, k = 10)
+
+# Initialize result vectors
+results_auc <- numeric(10)
+results_mse <- vector("numeric", length = 10)  
+
+# Perform cross-validation
+for (i in 1:10) {
+  train_indices <- unlist(folds[-i])  # Indices of training data
+  validation_indices <- folds[[i]]  # Indices of validation data
+  
+  train_data <- features[train_indices, ]
+  train_target <- target[train_indices]
+  
+  validation_data <- features[validation_indices, ]
+  validation_target <- target[validation_indices]
+  
+  # Train the random forest model
+  model <- randomForest(train_data, train_target)
+  
+  # Predict on the validation data
+   predictions <- predict(model, validation_data)
+  
+  # Convert factors to numeric
+  predictions <- as.numeric(as.character(predictions))
+  validation_target <- as.numeric(as.character(validation_target))
+  
+  # Compute MSE
+  mse <- caret::RMSE(predictions, validation_target)
+  results_mse[i] <- mse
+  
+  # Compute AUC
+  roc_obj <- roc(response = validation_target, predictor = predictions)
+  auc <- auc(roc_obj)
+  results_auc[i] <- auc
+}
+
+#print the results
+print(results_mse)
+print(results_auc)
+```
+
+```{r}
+variance_mse <- var(results_mse)
+mean_mse <- mean(results_mse)
+mean_auc <- mean(results_auc)
+
+variance_mse  # Variance of MSE across all folds
+mean_mse  # Mean of MSE across all folds
+mean_auc  # Mean of AUC across all folds
+```
+
+
+
+## Step 2 :
+
+
+### calculates and visualizes the feature importance on random forest model
+
+```{r}
+# Calculate feature importance using the random forest model
+importance_values <- importance(rf_model)
+importance_values <- rf_model$importance
+
+# Extract the importance values based on MeanDecreaseGini metric
+importance_df <- rf_model$importance[, "MeanDecreaseGini"]
+
+# Get the feature names from the importance values
+feature_names <- row.names(importance_values)
+
+# Create a dataframe to store feature names and importance values
+feature_rank <- data.frame(Features = feature_names, Importance = importance_df)
+
+# Select the top 12 features with the highest importance values
+feature_rank <- feature_rank[1:12,]
+
+# Sort the features in descending order of importance
+sorted_feature <- feature_rank %>%
+  arrange(desc(Importance))
+
+# Create a bar plot to visualize feature importance
+ggplot(sorted_feature, aes(x = Importance, y = fct_reorder(Features, Importance))) +
+  geom_bar(stat = "identity", aes(fill = Features)) +
+  geom_text(aes(label = round(Importance, 2),fontface = "bold"), hjust = 0.5, color = "black", size = 2) +  # Add the value of each bar
+  labs(x = "Importance", y = "Features", title = "Random Forest Feature Importance") +
+  theme_minimal() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+
+
+### Distribution of degrees by decision
+
+```{r}
+# Group the data by degree and decision and count the number of occurrences
+lang_counts <- new_data %>%
+  group_by(ind.degree, decision) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+# Calculate the percentage of each group
+lang_counts <- lang_counts %>%
+  group_by(ind.degree) %>%
+  mutate(percentage = count / sum(count))
+
+# Plot the data
+ggplot(lang_counts, aes(x = ind.degree, y = percentage, fill = factor(decision))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  geom_text(aes(label = paste0(round(percentage*100),"%")), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5) +
+  labs(title = "Distribution of degrees by decision",
+       x = "degree",
+       y = "Percentage") +
+  theme_classic()
+```
+
+
+
+### Distribution of number of languages by decision
+
+```{r}
+# Group the data by number of languages and decision and count the number of occurrences
+lang_counts <- new_data %>%
+  group_by(ind.languages, decision) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+# Calculate the percentage of each group
+lang_counts <- lang_counts %>%
+  group_by(ind.languages) %>%
+  mutate(percentage = count / sum(count))
+
+# Plot the data
+ggplot(lang_counts, aes(x = ind.languages, y = percentage, fill = factor(decision))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  geom_text(aes(label = paste0(round(percentage*100),"%")), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5) +
+  labs(title = "Distribution of number of languages by decision",
+       x = "Number of languages",
+       y = "Percentage") +
+  theme_classic()
+```
+
+
+
+### Distribution of grades by decision
+
+```{r}
+# Create a new column with grade ranges
+new_data$grade_range <- cut(new_data$ind.university_grade, breaks = seq(0, 100, by = 10), right = FALSE, include.lowest = TRUE, labels = paste0(seq(0, 90, by = 10), "-", seq(10, 100, by = 10)))
+
+# Group the data by range of grades and decision and count the number of occurrences
+lang_counts <- new_data %>%
+  group_by(grade_range, decision) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+# Calculate the percentage of each group
+lang_counts <- lang_counts %>%
+  group_by(grade_range) %>%
+  mutate(percentage = count / sum(count))
+
+# Plot the data
+ggplot(lang_counts, aes(x = grade_range, y = percentage, fill = factor(decision))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  geom_text(aes(label = paste0(round(percentage*100),"%")), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5) +
+    labs(title = "Distribution of grades by decision", x = "Grade range", y = "Count")+
+  theme_classic()
+```
+
+
+
+## Step 3 :
+
+
+### creates separate data frames for each unique value of the "company" variable
+
+```{r}
+# Get the unique values of the "company" variable in the new_data dataframe
+unique_values <- unique(new_data$company)
+
+# Create separate data frames for each unique value
+for (value in unique_values) {
+  new_df <- new_data[new_data$company == value, ]
+  # Exclude the splitting column
+  assign(paste0("data_", value), new_df)
+}
+```
+
+
+
+### trains random forest models on multiple datasets, extracts and ranks feature importance, and sets the plot size for visualization.
+
+```{r}
+# Remove the first column (ID) from data_A
+data_A <- data_A[, -1]
+
+# Train a random forest model (RF1) on data_A
+RF1 <- randomForest(factor(decision) ~ ., data = data_A, ntree = 500)
+
+# Extract the feature importance values from RF1
+importance_values1 <- RF1$importance
+importance_df1 <- RF1$importance[, "MeanDecreaseGini"]
+feature_names1 <- row.names(importance_values1)
+
+# Create a data frame (feature_rank1) to store feature names and importance values
+feature_rank1 <- data.frame(Features = feature_names1, Importance = importance_df1)
+
+# Sort the features in descending order of importance
+sorted_feature1 <- feature_rank1 %>%
+  arrange(desc(Importance))
+
+
+
+# Remove the first column (ID) from data_B
+data_B <- data_B[, -1]
+
+# Train a random forest model (RF2) on data_B
+RF2 <- randomForest(factor(decision) ~ ., data = data_B, ntree = 500)
+
+# Extract the feature importance values from RF2
+importance_values2 <- RF2$importance
+importance_df2 <- RF2$importance[, "MeanDecreaseGini"]
+feature_names2 <- row.names(importance_values2)
+
+# Create a data frame (feature_rank2) to store feature names and importance values
+feature_rank2 <- data.frame(Features = feature_names2, Importance = importance_df2)
+
+# Sort the features in descending order of importance
+sorted_feature2 <- feature_rank2 %>%
+  arrange(desc(Importance))
+
+
+
+# Remove the first column (ID) from data_C
+data_C <- data_C[, -1]
+
+# Train a random forest model (RF3) on data_C
+RF3 <- randomForest(factor(decision) ~ ., data = data_C, ntree = 500)
+
+# Extract the feature importance values from RF3
+importance_values3 <- RF3$importance
+importance_df3 <- RF3$importance[, "MeanDecreaseGini"]
+feature_names3 <- row.names(importance_values3)
+
+# Create a data frame (feature_rank3) to store feature names and importance values
+feature_rank3 <- data.frame(Features = feature_names3, Importance = importance_df3)
+
+# Sort the features in descending order of importance
+sorted_feature3 <- feature_rank3 %>%
+  arrange(desc(Importance))
+
+
+# Remove the first column (ID) from data_D
+data_D <- data_D[, -1]
+
+# Train a random forest model (RF4) on data_D
+RF4 <- randomForest(factor(decision) ~ ., data = data_D, ntree = 500)
+
+# Extract the feature importance values from RF4
+importance_values4 <- RF4$importance
+importance_df4 <- RF4$importance[, "MeanDecreaseGini"]
+feature_names4 <- row.names(importance_values4)
+
+# Create a data frame (feature_rank4) to store feature names and importance values
+feature_rank4 <- data.frame(Features = feature_names4, Importance = importance_df4)
+
+# Sort the features in descending order of importance
+sorted_feature4 <- feature_rank4 %>%
+  arrange(desc(Importance))
+
+# Set the size of the overall plot
+options(repr.plot.width = 10, repr.plot.height = 8)
+```
+
+
+
+### generates individual bar plots for the top 5 important features in each company's data and combines them into a grid for visualization.
+
+```{r}
+# Function to filter top N categories based on Importance
+filter_top_n <- function(df, n) {
+  df %>%
+    arrange(desc(Importance)) %>%
+    top_n(n, Importance)
+}
+
+# Set the size of the overall plot
+options(repr.plot.width = 20, repr.plot.height = 40)
+
+
+# Plot 1
+
+plot1 <- ggplot(filter_top_n(sorted_feature1, 5), aes(x = Importance, y = fct_reorder(Features, Importance))) +
+  geom_bar(stat = "identity", aes(fill = Features)) +
+  labs(x = "Importance", y = "Features", title = "Company_A") +
+  theme_minimal() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size =7))
+
+
+# Plot 2
+
+plot2 <- ggplot(filter_top_n(sorted_feature2, 5), aes(x = Importance, y = fct_reorder(Features, Importance))) +
+  geom_bar(stat = "identity", aes(fill = Features)) +
+  labs(x = "Importance", y = "Features", title = "Company_B") +
+  theme_minimal() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size =7))
+
+
+# Plot 3
+
+plot3 <- ggplot(filter_top_n(sorted_feature3, 5), aes(x = Importance, y = fct_reorder(Features, Importance))) +
+  geom_bar(stat = "identity", aes(fill = Features)) +
+  labs(x = "Importance", y = "Features", title = "Company_C") +
+  theme_minimal() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size =7))
+
+
+# Plot 4
+
+plot4 <- ggplot(filter_top_n(sorted_feature4, 5), aes(x = Importance, y = fct_reorder(Features, Importance))) +
+  geom_bar(stat = "identity", aes(fill = Features)) +
+  labs(x = "Importance", y = "Features", title = "Company_D") +
+  theme_minimal() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size =7))
+
+
+# Combine the plots using grid.arrange
+combined_plot <- grid.arrange(plot1, plot2, plot3, plot4, ncol = 2)
+
+# Display the combined plot
+combined_plot
+```
+
+
+###README file
+
+```{r include_data_readme, comment='',results='asis'}
+library(knitr)
+cat(knit_expand(text =readLines('README.md')), sep = '\n')
+```
+
